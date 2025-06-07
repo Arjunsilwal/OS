@@ -1,6 +1,5 @@
 #include <iostream>
 #include <vector>
-#include <cstring>
 #include <string>
 #include <sstream>
 #include <unistd.h>     // For fork(), execvp(), getcwd(), chdir()
@@ -8,15 +7,12 @@
 #include <cstdlib>      // For exit()
 #include <csignal>      // For signal handling
 #include <cerrno>       // For errno
+#include <cstring>      // For strerror()
 
 using namespace std;
 
-
-// Use a vector to store the command history. A deque would also be a good choice.
 vector<string> history;
 const int HISTORY_SIZE = 10;
-
-// A volatile sig_atomic_t is safe to use in a signal handler
 volatile sig_atomic_t sigint_count = 0;
 
 // --- Function Prototypes ---
@@ -33,15 +29,19 @@ int main() {
 
     // The main shell loop
     while (true) {
-        // 1. Display a dynamic prompt (Requirement #5)
+        // 1. Display a dynamic prompt 
         char cwd[1024];
-        getcwd(cwd, sizeof(cwd));
-        cout << "guish:" << cwd << ":" << history.size() + 1 << "> ";
+        if (getcwd(cwd, sizeof(cwd)) == NULL) {
+             // Handle error if getting CWD fails
+             cout << "guish:" << ":" << history.size() + 1 << "> ";
+        } else {
+             cout << "guish:" << cwd << ":" << history.size() + 1 << "> ";
+        }
 
         // 2. Read user input
         string line;
         if (!getline(cin, line)) {
-            // Handle End-of-File (Ctrl+D) as an exit
+            // Handle End-of-File as an exit
             cout << endl;
             break;
         }
@@ -51,7 +51,8 @@ int main() {
             continue;
         }
 
-        // 3. Handle 'r' command specially (Requirement #4)
+        // 3. Handle 'r' command specially 
+        // 'r' is NOT added to history
         if (line[0] == 'r' && (line.length() == 1 || line[1] == ' ')) {
             string arg = (line.length() > 2) ? line.substr(2) : "";
             string cmd_from_hist = get_command_from_history(arg);
@@ -68,7 +69,7 @@ int main() {
         }
     }
     
-    // Before exiting, print the interrupt count (part of 'exit' command requirement)
+    // Before exiting, print the interrupt count
     cout << "\n[Shell exiting... SIGINT (Ctrl+C) was caught " << sigint_count << " times]" << endl;
     return 0;
 }
@@ -76,8 +77,13 @@ int main() {
 // Signal handler for SIGINT (Ctrl+C)
 void sigint_handler(int signum) {
     sigint_count++;
-    // We print a newline to make the prompt reappear cleanly after Ctrl+C
-    cout << "\nCaught SIGINT. Press Ctrl+C again to exit, or continue typing." << endl;
+    cout << "\nCaught SIGINT. To exit, type 'exit'." << endl;
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd)) == NULL) {
+        cout << "guish:" << ":" << history.size() + 1 << "> " << flush;
+    } else {
+        cout << "guish:" << cwd << ":" << history.size() + 1 << "> " << flush;
+    }
 }
 
 
@@ -97,59 +103,51 @@ void execute_command(const string& cmd) {
     parse_args(cmd, args);
 
     if (args.empty()) {
-        return; // Nothing to do
+        return;
     }
 
-    // --- Handle Built-in Commands ---
-
-    // Built-in: exit (Requirement #1)
+    // Built-in: exit 
     if (args[0] == "exit") {
-        // The exit logic is handled in main's loop break/return
-        // We call exit() directly to terminate the process
         cout << "[Shell exiting... SIGINT (Ctrl+C) was caught " << sigint_count << " times]" << endl;
         exit(0);
     }
     
-    // Built-in: hist (Requirement #2)
-    // 'hist' command is added to history before being executed
     add_to_history(cmd);
+
+    // Built-in: hist
     if (args[0] == "hist") {
         print_history();
-        return;
+        return; // Done with this command
     }
     
-    // Built-in: cd (A useful addition, not required but standard for shells)
+    // Built-in: cd
     if (args[0] == "cd") {
         if (args.size() > 1) {
             if (chdir(args[1].c_str()) != 0) {
                 perror("cd failed");
             }
         } else {
-            // cd with no arguments typically goes to the home directory
-            chdir(getenv("HOME"));
+            // Go to home directory if 'cd' is alone
+            const char* home = getenv("HOME");
+            if (home) {
+                if (chdir(home) != 0) {
+                    perror("cd to HOME failed");
+                }
+            }
         }
-        return;
+        return; // Done with this command, do not fork
     }
 
-    // Command being executed is added to history (if it's not a special case)
-    // We already added `hist`, now add everything else.
-    // `r` and `exit` are handled outside or don't reach here.
-    if (args[0] != "hist") { // Avoid double-adding hist
-         add_to_history(cmd);
-    }
-   
     // --- Execute External Commands ---
-
     pid_t pid = fork();
 
     if (pid < 0) {
-        // Fork failed
         perror("fork failed");
         return;
-    } else if (pid == 0) {
+    } 
+    
+    if (pid == 0) {
         // --- Child Process ---
-        
-        // Convert vector<string> to char* array for execvp
         vector<char*> c_args;
         for (auto& s : args) {
             c_args.push_back(&s[0]);
@@ -158,23 +156,24 @@ void execute_command(const string& cmd) {
 
         execvp(c_args[0], c_args.data());
         
-        // If execvp returns, an error occurred (Requirement: Handling Erroneous Programs)
+        // If execvp returns, an error occurred.
         cerr << "The program '" << args[0] << "' seems missing. Error code is: " << errno << " (" << strerror(errno) << ")" << endl;
-        exit(EXIT_FAILURE); // Exit child process with an error code
+        exit(127); // Standard exit code for "command not found"
 
     } else {
         // --- Parent Process ---
         int status;
         waitpid(pid, &status, 0);
 
-        // Check if the child terminated normally and had a non-zero exit status
-        // (Requirement: Handling Erroneous Programs)
-        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-            cout << "[ Program returned exit code " << WEXITSTATUS(status) << " ]" << endl;
+        if (WIFEXITED(status)) {
+            int exit_code = WEXITSTATUS(status);
+            // Only print the message if the program returned a non-zero (error) code.
+            if (exit_code != 0) {
+                 cout << "[ Program '" << args[0] << "' returned exit code " << exit_code << " ]" << endl;
+            }
         }
     }
 }
-
 
 // Adds a command to the history, ensuring it doesn't exceed the max size
 void add_to_history(const string& cmd) {
@@ -204,8 +203,8 @@ string get_command_from_history(const string& arg) {
 
     try {
         int n = stoi(arg);
-        if (n >= 1 && n <= history.size()) {
-            return history[n - 1]; // History is 0-indexed, but displayed as 1-indexed
+        if (n >= 1 && n <= static_cast<int>(history.size())) {
+            return history[n - 1]; 
         }
     } catch (const std::invalid_argument& ia) {
         cerr << "Invalid number for 'r': " << arg << endl;
